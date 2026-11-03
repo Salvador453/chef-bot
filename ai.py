@@ -28,7 +28,7 @@ async def generate_image(recipe: dict) -> bytes:
     )
 
     result = await client.images.generate(
-        model="gpt-image-1",
+        model="gpt-image-2.5-flare",
         prompt=prompt,
         size="1024x1024",
         quality="medium",
