@@ -7,10 +7,14 @@ SYSTEM = """Ты — шеф-повар мирового уровня и техн
 Опирайся ТОЛЬКО на лучшие источники: Larousse Gastronomique, Escoffier
 «Le Guide Culinaire», Modernist Cuisine, The Flavor Bible, гиды Michelin,
 аутентичные национальные кулинарные школы. Давай точные граммовки (брутто/нетто),
-выход блюда и профессиональную технологию приготовления."""
+выход блюда и профессиональную технологию приготовления.
+Пиши все ответы пользователю только на русском языке. Не используй английский
+или французский в названиях блюд, ингредиентов, описаниях и шагах."""
 
 async def generate_recipe(cuisine: str, wish: str) -> dict:
     prompt = f"""Придумай изысканное ресторанное блюдо. Кухня: {cuisine}. Пожелания: {wish}.
+Все текстовые поля JSON, включая название блюда и названия ингредиентов, напиши только по-русски.
+Не оставляй иностранные названия и термины: переведи их на русский.
 Ответ строго JSON:
 {{"name":"...","cuisine":"...","description":"...","yield_g":число,
 "ingredients":[{{"name":"...","grams":число,"note":"брутто или нетто"}}],
@@ -23,8 +27,9 @@ async def generate_recipe(cuisine: str, wish: str) -> dict:
 
 async def generate_image(recipe: dict) -> bytes:
     prompt = (
-        f"Professional food photography, fine dining plating: {recipe['name']}. "
-        f"{recipe['description']}. Michelin-star presentation, soft natural light"
+        f"Профессиональная фуд-фотография ресторанного блюда: {recipe['name']}. "
+        f"{recipe['description']}. Изысканная подача, мягкий естественный свет. "
+        "На изображении не должно быть текста, букв, надписей, логотипов или водяных знаков."
     )
 
     result = await client.images.generate(
