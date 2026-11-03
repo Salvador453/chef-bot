@@ -22,11 +22,19 @@ async def generate_recipe(cuisine: str, wish: str) -> dict:
     return json.loads(r.choices[0].message.content)
 
 async def generate_image(recipe: dict) -> bytes:
-    prompt = (f"Professional food photography, fine dining plating: {recipe['name']}. "
-              f"{recipe['description']}. Michelin-star presentation, soft natural light")
-    r = await client.images.generate(model="dall-e-3", prompt=prompt,
-                                     size="1024x1024", response_format="b64_json")
-    return base64.b64decode(r.data[0].b64_json)
+    prompt = (
+        f"Professional food photography, fine dining plating: {recipe['name']}. "
+        f"{recipe['description']}. Michelin-star presentation, soft natural light"
+    )
+
+    result = await client.images.generate(
+        model="gpt-image-1",
+        prompt=prompt,
+        size="1024x1024",
+    )
+
+    image_data = result.data[0].b64_json
+    return base64.b64decode(image_data)
 
 async def build_tasting_set(dishes: list[dict], courses: int) -> str:
     brief = "\n".join(f"- {d['name']} ({d['cuisine']}): вкусы {', '.join(d.get('flavor_profile', []))}"
