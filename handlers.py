@@ -53,12 +53,25 @@ async def got_wish(m: Message, state: FSMContext):
 
 @router.message(Command("img"))
 async def img(m: Message):
-    if m.from_user.id not in last: return await m.answer("Сначала /new")
-    await m.answer("🖼 Генерирую фото...")
-    r, _ = last[m.from_user.id]
-    photo = await ai.generate_image(r)
-    last[m.from_user.id] = (r, photo)
-    await m.answer_photo(BufferedInputFile(photo, "dish.png"), caption=r["name"])
+    if m.from_user.id not in last:
+        return await m.answer("Сначала создайте блюдо командой /new")
+
+    await m.answer("🖼 Генерирую фото. Это может занять до минуты...")
+    recipe, _ = last[m.from_user.id]
+
+    try:
+        photo = await ai.generate_image(recipe)
+        last[m.from_user.id] = (recipe, photo)
+        await m.answer_photo(
+            BufferedInputFile(photo, filename="dish.png"),
+            caption=recipe["name"],
+        )
+    except Exception as e:
+        import logging
+        logging.exception("Ошибка при генерации изображения")
+        await m.answer(
+            f"Не удалось создать фото: {type(e).__name__}: {str(e)[:300]}"
+        )
 
 @router.message(Command("save"))
 async def save(m: Message):
