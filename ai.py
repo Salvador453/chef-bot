@@ -1,5 +1,4 @@
 import os, json, base64
-import aiohttp
 from openai import AsyncOpenAI
 
 client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
@@ -29,18 +28,13 @@ async def generate_image(recipe: dict) -> bytes:
     )
 
     result = await client.images.generate(
-        model="dall-e-3",
+        model="gpt-image-1",
         prompt=prompt,
         size="1024x1024",
-        quality="standard",
+        quality="medium",
     )
 
-    image_url = result.data[0].url
-
-    async with aiohttp.ClientSession() as session:
-        async with session.get(image_url) as response:
-            response.raise_for_status()
-            return await response.read()
+    return base64.b64decode(result.data[0].b64_json)
 
 async def build_tasting_set(dishes: list[dict], courses: int) -> str:
     brief = "\n".join(f"- {d['name']} ({d['cuisine']}): вкусы {', '.join(d.get('flavor_profile', []))}"
