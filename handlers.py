@@ -6,16 +6,20 @@ from aiogram.types import Message, BufferedInputFile, InlineKeyboardMarkup, Inli
 import ai, db, docs
 
 router = Router()
-last = {}   # последний сгенерированный рецепт {user_id: (recipe, photo_bytes)}
+last = {}        # Последний рецепт {user_id: (recipe, photo_bytes)}
+histories = {}   # История диалога для правок {user_id: [{"role": "...", "content": "..."}, ...]}
 
 class New(StatesGroup):
     cuisine = State(); wish = State()
 
+class RecipeEdit(StatesGroup):
+    chat = State()
+
 class Prices(StatesGroup):
     wait = State()
 
-HELP = """🍽 Шеф-бот. Команды:
-/new — придумать блюдо (ИИ)
+HELP = """🍽 Шеф-бот (Агент Шеф + Технолог). Команды:
+/new — придумать блюдо (Двухагентный генератор)
 /img — сгенерировать фото последнего блюда
 /save — сохранить блюдо с фото
 /my — мои блюда
@@ -33,6 +37,9 @@ def get_recipe_keyboard(rid: int = None):
         [
             InlineKeyboardButton(text="🖼 Фото", callback_data="act_img"),
             InlineKeyboardButton(text="💾 Сохранить", callback_data="act_save")
+        ],
+        [
+            InlineKeyboardButton(text="💬 Изменить с ИИ", callback_data="act_start_chat")
         ]
     ]
     if rid:
@@ -61,15 +68,20 @@ async def got_cuisine(m: Message, state: FSMContext):
 @router.message(New.wish)
 async def got_wish(m: Message, state: FSMContext):
     data = await state.get_data(); await state.clear()
-    await m.answer("👨‍🍳 Придумываю блюдо с учетом КБЖУ и оборудования...")
+    await m.answer("👨‍🍳 Шеф-повар создает концепцию, а технолог-ревизор проверяет технологию и КБЖУ...")
+    
     r = await ai.generate_recipe(data["cuisine"], m.text)
     last[m.from_user.id] = (r, None)
+    histories[m.from_user.id] = [] # Сбрасываем историю диалога для нового рецепта
     
+    await send_recipe_card(m, r)
+
+async def send_recipe_card(message: Message, r: dict):
     ings = "\n".join(f"• {i['name']} — {i['grams']} г" for i in r["ingredients"])
     eq = ", ".join(r.get("equipment", []))
     kbzhu = f"КБЖУ (на 100г): К: {r.get('calories_per_100g', 0)} ккал | Б: {r.get('proteins_per_100g', 0)}г | Ж: {r.get('fats_per_100g', 0)}г | У: {r.get('carbs_per_100g', 0)}г"
     
-    await m.answer(
+    await message.answer(
         f"✨ <b>{r['name']}</b>\n{r['description']}\n\n"
         f"Выход: {r['yield_g']} г\n{kbzhu}\n\n"
         f"⚙️ <b>Оборудование:</b> {eq}\n\n"
@@ -78,6 +90,45 @@ async def got_wish(m: Message, state: FSMContext):
         parse_mode="HTML",
         reply_markup=get_recipe_keyboard()
     )
+
+@router.callback_query(F.data == "act_start_chat")
+async def cb_start_chat(cq: CallbackQuery, state: FSMContext):
+    if cq.from_user.id not in last:
+        return await cq.answer("Сначала создайте блюдо через /new", show_alert=True)
+    await state.set_state(RecipeEdit.chat)
+    await cq.message.answer("💬 **Режим диалога с технологом активен**\nНапишите, что именно изменить в рецепте (например: *«сделай соус острее», «замени рыбу на курицу», «уменьши калорийность»*). Для выхода из режима отправьте /cancel или любую другую команду.", parse_mode="Markdown")
+    await cq.answer()
+
+@router.message(RecipeEdit.chat, Command("cancel"))
+async def cancel_chat(m: Message, state: FSMContext):
+    await state.clear()
+    await m.answer("✅ Режим диалога завершен.")
+
+@router.message(RecipeEdit.chat)
+async def handle_recipe_chat(m: Message, state: FSMContext):
+    uid = m.from_user.id
+    if uid not in last:
+        await state.clear()
+        return await m.answer("Активный рецепт не найден.")
+    
+    current_recipe, photo = last[uid]
+    user_text = m.text
+    
+    await m.answer("🔄 Технолог пересчитывает рецепт с учетом ваших пожеланий...")
+    
+    history = histories.get(uid, [])
+    history.append({"role": "user", "content": user_text})
+    
+    try:
+        updated_recipe = await ai.update_recipe_with_dialogue(current_recipe, history, user_text)
+        history.append({"role": "assistant", "content": json.dumps(updated_recipe, ensure_ascii=False)})
+        histories[uid] = history
+        last[uid] = (updated_recipe, photo)
+        
+        await m.answer("✅ Рецепт успешно обновлен!")
+        await send_recipe_card(m, updated_recipe)
+    except Exception as e:
+        await m.answer(f"Не удалось обновить рецепт: {str(e)}")
 
 @router.message(Command("scale"))
 async def scale_cmd(m: Message, command: CommandObject):
@@ -267,4 +318,4 @@ async def shop(m: Message, command: CommandObject):
     recipes = [r for r in recipes if r]
     if not recipes: return await m.answer("Укажи id: /shop 1 2")
     await m.answer(docs.shopping_list(recipes))
-    
+                               
