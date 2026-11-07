@@ -29,7 +29,7 @@ HELP = """🍽 Шеф-бот (Агент Шеф + Технолог). Коман�
 /sub <ингредиент> — подобрать кулинарный аналог
 /cook <id> — интерактивный пошаговый режим готовки
 /prices — внести цены продуктов
-/cost <id> — себестоимость и food cost
+/cost <id> — себестоимость (с автопоиском цен в Украине через Serper)
 /set <id> <id> ... — дегустационный сет
 /shop <id> <id> ... — список закупок"""
 
@@ -73,7 +73,7 @@ async def got_wish(m: Message, state: FSMContext):
     
     r = await ai.generate_recipe(data["cuisine"], m.text)
     last[m.from_user.id] = (r, None)
-    histories[m.from_user.id] = [] # Сбрасываем историю диалога для нового рецепта
+    histories[m.from_user.id] = []
     
     await send_recipe_card(m, r)
 
@@ -218,13 +218,34 @@ async def cb_save(cq: CallbackQuery):
     await cq.message.answer(f"💾 Рецепт сохранен в базу! ID = {rid}\nТеперь доступны ТТК и себестоимость.", reply_markup=get_recipe_keyboard(rid))
     await cq.answer()
 
+async def process_cost_request(message: Message, user_id: int, rid: int):
+    r, _ = db.get_recipe(user_id, rid)
+    if not r:
+        return await message.answer("Рецепт не найден.")
+    
+    local_prices = db.get_prices(user_id)
+    text, missing = docs.food_cost(r, local_prices)
+    
+    if missing:
+        await message.answer(f"🔍 Ищу актуальные рыночные цены в Украине через Serper для: {', '.join(missing)}...")
+        web_prices = await ai.estimate_missing_prices(missing)
+        text, still_missing = docs.food_cost(r, local_prices, web_prices)
+        if still_missing:
+            text += f"\n\n⚠️ Не удалось найти цены на: {', '.join(still_missing)}"
+            
+    await message.answer(text)
+
 @router.callback_query(F.data.startswith("act_cost:"))
 async def cb_cost(cq: CallbackQuery):
     rid = int(cq.data.split(":")[1])
-    r, _ = db.get_recipe(cq.from_user.id, rid)
-    if r:
-        await cq.message.answer(docs.food_cost(r, db.get_prices(cq.from_user.id)))
+    await process_cost_request(cq.message, cq.from_user.id, rid)
     await cq.answer()
+
+@router.message(Command("cost"))
+async def cost(m: Message, command: CommandObject):
+    rid = int(command.args or 0)
+    if not rid: return await m.answer("Не найдено. /cost <id>")
+    await process_cost_request(m, m.from_user.id, rid)
 
 @router.callback_query(F.data.startswith("act_ttk:"))
 async def cb_ttk(cq: CallbackQuery):
@@ -297,12 +318,6 @@ async def got_prices(m: Message, state: FSMContext):
             except ValueError: pass
     await state.clear(); await m.answer(f"✅ Сохранено цен: {n}")
 
-@router.message(Command("cost"))
-async def cost(m: Message, command: CommandObject):
-    r, _ = db.get_recipe(m.from_user.id, int(command.args or 0))
-    if not r: return await m.answer("Не найдено. /cost <id>")
-    await m.answer(docs.food_cost(r, db.get_prices(m.from_user.id)))
-
 @router.message(Command("set"))
 async def tasting(m: Message, command: CommandObject):
     ids = [int(x) for x in (command.args or "").split() if x.isdigit()]
@@ -319,4 +334,4 @@ async def shop(m: Message, command: CommandObject):
     recipes = [r for r in recipes if r]
     if not recipes: return await m.answer("Укажи id: /shop 1 2")
     await m.answer(docs.shopping_list(recipes))
-                               
+    
