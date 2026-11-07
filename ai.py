@@ -1,7 +1,8 @@
-import os, json, base64
+import os, json, base64, httpx
 from openai import AsyncOpenAI
 
 client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
+SERPER_API_KEY = os.environ.get("SERPER_API_KEY", "")
 
 SYSTEM_CHEF = """Ты — шеф-повар мирового уровня, обладающий опытом работы в ресторанах высокой кухни. 
 Опирайся на лучшие мировые гастрономические источники: гиды Michelin, Larousse Gastronomique, Escoffier «Le Guide Culinaire», Modernist Cuisine, The Flavor Bible и аутентичные национальные кулинарные школы. 
@@ -13,7 +14,7 @@ SYSTEM_TECH = """Ты — строгий технолог ресторанной
 Проверяй граммовки (брутто/нетто), корректность КБЖУ на 100г, оборудование и пошаговую технологию. 
 Исправляй любые кулинарные или технологические ошибки черновика.
 
-ЖЕСТКОЕ ПРАВИЛО ЯЗЫКА: Все текстовые поля в JSON (название блюда, описание, оборудование, ингредиенты, шаги, подача и вкусовой профиль) ДОЛЖНЫ БЫТЬ НАПИСАНЫ СТРОГО НА РУССКОМ ЯЗЫКЕ. Переведи любые иностранные термины (включая названия оборудования вроде skillet или tongs) на русский язык. Никакого английского!
+ЖЕСТКОЕ ПРАВИЛО ЯЗЫКА: Все текстовые поля в JSON (название блюда, описание, оборудование, ингредиенты, шаги, подача и вкусовой профиль) ДОЛЖНЫ БЫТЬ НАПИСАНЫ СТРОГО НА РУССКОМ ЯЗЫКЕ. Переведи любые иностранные термины на русский язык. Никакого английского!
 
 Ответ ВСЕГОДА возвращай строго в формате JSON со следующей структурой:
 {"name":"...","cuisine":"...","description":"...","yield_g":число,
@@ -22,8 +23,68 @@ SYSTEM_TECH = """Ты — строгий технолог ресторанной
 "ingredients":[{"name":"...","grams":число,"note":"брутто или нетто"}],
 "steps":["шаг 1 на русском","..."],"plating":"описание подачи на русском","flavor_profile":["вкус1","..."]}"""
 
+async def search_ukraine_price(ingredient_name: str) -> str:
+    if not SERPER_API_KEY:
+        return "⚠️ API-ключ Serper не настроен."
+        
+    url = "https://google.serper.dev/search"
+    query = f"купить {ingredient_name} цена за кг Украина Сильпо АТБ Метро"
+    
+    payload = {
+        "q": query,
+        "gl": "ua",
+        "hl": "ru",
+        "num": 3
+    }
+    
+    headers = {
+        "X-API-KEY": SERPER_API_KEY,
+        "Content-Type": "application/json"
+    }
+    
+    async with httpx.AsyncClient() as client_http:
+        try:
+            response = await client_http.post(url, json=payload, headers=headers, timeout=10.0)
+            data = response.json()
+            
+            snippets = []
+            for item in data.get("organic", []):
+                title = item.get("title", "")
+                snippet = item.get("snippet", "")
+                snippets.append(f"- {title}: {snippet}")
+                
+            if not snippets:
+                return "Актуальные цены в сети не найдены."
+            
+            return "\n".join(snippets)
+        except Exception as e:
+            return f"Ошибка при поиске цен: {str(e)}"
+
+async def estimate_missing_prices(missing_ingredients: list[str]) -> dict:
+    estimated = {}
+    for ing in missing_ingredients:
+        search_data = await search_ukraine_price(ing)
+        prompt = f"""Проанализируй результаты веб-поиска по ценам в Украине на продукт '{ing}':
+{search_data}
+
+Определи среднюю рыночную цену ЗА 1 КИЛОГРАММ (или 1 литр/штуку) в украинских гривнах (UAH).
+Ответь СТРОГО в формате JSON:
+{{"ingredient": "{ing}", "price_kg": число_в_грн_или_null}}"""
+
+        try:
+            r = await client.chat.completions.create(
+                model="gpt-4o", response_format={"type": "json_object"},
+                messages=[{"role": "system", "content": "Ты эксперт по оценке ресторанных цен в Украине. Отвечай только JSON."},
+                          {"role": "user", "content": prompt}]
+            )
+            res = json.loads(r.choices[0].message.content)
+            if res.get("price_kg"):
+                estimated[ing] = float(res["price_kg"])
+        except Exception:
+            pass
+    return estimated
+
 async def generate_recipe(cuisine: str, wish: str) -> dict:
-    # Агент 1: Шеф-повар создает концепцию на русском
     chef_prompt = f"Придумай концепцию ресторанного блюда по стандартам гидов Michelin и высокой кухни. Кухня: {cuisine}. Пожелания: {wish}. Опиши ингредиенты, шаги и вкусовой профиль СТРОГО на русском языке."
     r1 = await client.chat.completions.create(
         model="gpt-4o",
@@ -31,8 +92,7 @@ async def generate_recipe(cuisine: str, wish: str) -> dict:
     )
     draft = r1.choices[0].message.content
 
-    # Агент 2: Технолог-ревизор проверяет и гарантирует русский язык в JSON
-    tech_prompt = f"Проверь этот черновик рецепта по канонам Michelin, Escoffier и Modernist Cuisine, выверь точные граммовки, КБЖУ и технологию. Убедись, что абсолютно весь текст в итоговом JSON написан на чистом русском языке (переведи всю кухонную утварь и термины на русский), устрани ошибки и верни готовый JSON:\n{draft}"
+    tech_prompt = f"Проверь этот черновик рецепта по канонам Michelin, Escoffier и Modernist Cuisine, выверь точные граммовки, КБЖУ и технологию. Убедись, что абсолютно весь текст в итоговом JSON написан на чистом русском языке, устрани ошибки и верни готовый JSON:\n{draft}"
     r2 = await client.chat.completions.create(
         model="gpt-4o", response_format={"type": "json_object"},
         messages=[{"role": "system", "content": SYSTEM_TECH}, {"role": "user", "content": tech_prompt}]
@@ -94,4 +154,4 @@ async def build_tasting_set(dishes: list[dict], courses: int) -> str:
         messages=[{"role": "system", "content": SYSTEM_TECH}, {"role": "user", "content": prompt}]
     )
     return r.choices[0].message.content
-    
+        
