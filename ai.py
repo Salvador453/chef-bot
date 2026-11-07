@@ -15,8 +15,10 @@ async def generate_recipe(cuisine: str, wish: str) -> dict:
     prompt = f"""Придумай изысканное ресторанное блюдо. Кухня: {cuisine}. Пожелания: {wish}.
 Все текстовые поля JSON, включая название блюда и названия ингредиентов, напиши только по-русски.
 Не оставляй иностранные названия и термины: переведи их на русский.
-Ответ строго JSON:
+Ответ строго JSON со следующей структурой:
 {{"name":"...","cuisine":"...","description":"...","yield_g":число,
+"calories_per_100g":число,"proteins_per_100g":число,"fats_per_100g":число,"carbs_per_100g":число,
+"equipment":["оборудование/инструмент 1","..."],
 "ingredients":[{{"name":"...","grams":число,"note":"брутто или нетто"}}],
 "steps":["шаг 1","..."],"plating":"описание подачи","flavor_profile":["вкус1","..."]}}"""
     r = await client.chat.completions.create(
@@ -31,15 +33,22 @@ async def generate_image(recipe: dict) -> bytes:
         f"{recipe['description']}. Изысканная подача, мягкий естественный свет. "
         "На изображении не должно быть текста, букв, надписей, логотипов или водяных знаков."
     )
-
     result = await client.images.generate(
         model="gpt-image-2.5-flare",
         prompt=prompt,
         size="1024x1024",
         quality="medium",
     )
-
     return base64.b64decode(result.data[0].b64_json)
+
+async def get_substitution(ingredient: str) -> str:
+    prompt = f"Предложи 2-3 профессиональных кулинарных аналога для ингредиента '{ingredient}' с учетом текстуры, влажности и вкусового профиля. Дай четкий ответ по-русски."
+    r = await client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "system", "content": SYSTEM},
+                  {"role": "user", "content": prompt}]
+    )
+    return r.choices[0].message.content
 
 async def build_tasting_set(dishes: list[dict], courses: int) -> str:
     brief = "\n".join(f"- {d['name']} ({d['cuisine']}): вкусы {', '.join(d.get('flavor_profile', []))}"
@@ -52,3 +61,4 @@ async def build_tasting_set(dishes: list[dict], courses: int) -> str:
         messages=[{"role": "system", "content": SYSTEM},
                   {"role": "user", "content": prompt}])
     return r.choices[0].message.content
+                            
