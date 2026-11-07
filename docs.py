@@ -73,20 +73,31 @@ def make_excel(recipe: dict) -> io.BytesIO:
     for i, s in enumerate(recipe["steps"], 1): ws.append([f"{i}. {s}"])
     buf = io.BytesIO(); wb.save(buf); buf.seek(0); return buf
 
-def food_cost(recipe: dict, prices: dict) -> str:
+def food_cost(recipe: dict, prices: dict, web_prices: dict = None) -> tuple[str, list[str]]:
+    web_prices = web_prices or {}
     total, lines, missing = 0.0, [], []
     for ing in recipe["ingredients"]:
-        price = next((p for k, p in prices.items() if k in ing["name"].lower()), None)
+        ing_name = ing["name"]
+        price = next((p for k, p in prices.items() if k in ing_name.lower()), None)
+        is_web = False
+        
+        if price is None and ing_name in web_prices:
+            price = web_prices[ing_name]
+            is_web = True
+            
         if price is None:
-            missing.append(ing["name"]); continue
+            missing.append(ing_name)
+            continue
+            
         cost = ing["grams"] / 1000 * price
         total += cost
-        lines.append(f"• {ing['name']}: {ing['grams']} г × {price}/кг = {cost:.2f}")
+        tag = " (🔍 Серпер)" if is_web else ""
+        lines.append(f"• {ing_name}: {ing['grams']} г × {price:.2f} грн/кг{tag} = {cost:.2f} грн")
+        
     text = f"💰 Себестоимость «{recipe['name']}»:\n" + "\n".join(lines)
-    text += f"\n\nИтого: {total:.2f}"
-    text += f"\n📊 Цена в меню при food cost 30%: {total/0.3:.2f}"
-    if missing: text += "\n\n⚠️ Нет цен на: " + ", ".join(missing)
-    return text
+    text += f"\n\nИтого: {total:.2f} грн"
+    text += f"\n📊 Цена в меню при food cost 30%: {total/0.3:.2f} грн"
+    return text, missing
 
 def shopping_list(recipes: list[dict]) -> str:
     agg = {}
