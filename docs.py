@@ -20,6 +20,7 @@ def scale_recipe_data(recipe: dict, new_yield: float) -> dict:
         ni = ing.copy()
         ni["grams"] = round(ing["grams"] * factor, 1)
         new_scaled_ings.append(ni)
+    new_r["ingredients"] = new_scaled_ings
     return new_r
 
 def make_pdf(recipe: dict, photo: bytes | None) -> io.BytesIO:
@@ -30,7 +31,6 @@ def make_pdf(recipe: dict, photo: bytes | None) -> io.BytesIO:
     c.setFont("DejaVu", 9)
     c.drawString(50, y, f"Кухня: {recipe['cuisine']} | Выход: {recipe['yield_g']} г"); y -= 16
     
-    # КБЖУ
     kbzhu = f"КБЖУ (на 100г): К: {recipe.get('calories_per_100g', 0)} ккал | Б: {recipe.get('proteins_per_100g', 0)}г | Ж: {recipe.get('fats_per_100g', 0)}г | У: {recipe.get('carbs_per_100g', 0)}г"
     c.drawString(50, y, kbzhu); y -= 16
 
@@ -40,7 +40,6 @@ def make_pdf(recipe: dict, photo: bytes | None) -> io.BytesIO:
         except Exception:
             pass
 
-    # Оборудование
     eq = recipe.get("equipment", [])
     if eq:
         c.drawString(50, y, "Оборудование: " + ", ".join(eq)); y -= 16
