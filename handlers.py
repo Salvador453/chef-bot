@@ -2,7 +2,7 @@ from aiogram import Router, F
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, BufferedInputFile
+from aiogram.types import Message, BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 import ai, db, docs
 
 router = Router()
@@ -20,10 +20,30 @@ HELP = """🍽 Шеф-бот. Команды:
 /save — сохранить блюдо с фото
 /my — мои блюда
 /ttk <id> — ТТК в PDF + Excel
+/scale <id> <вес> — пересчитать граммовки под новый выход
+/sub <ингредиент> — подобрать кулинарный аналог
+/cook <id> — интерактивный пошаговый режим готовки
 /prices — внести цены продуктов
 /cost <id> — себестоимость и food cost
 /set <id> <id> ... — дегустационный сет
 /shop <id> <id> ... — список закупок"""
+
+def get_recipe_keyboard(rid: int = None):
+    buttons = [
+        [
+            InlineKeyboardButton(text="🖼 Фото", callback_data="act_img"),
+            InlineKeyboardButton(text="💾 Сохранить", callback_data="act_save")
+        ]
+    ]
+    if rid:
+        buttons.append([
+            InlineKeyboardButton(text="💰 Себестоимость", callback_data=f"act_cost:{rid}"),
+            InlineKeyboardButton(text="🖨 ТТК (PDF/Excel)", callback_data=f"act_ttk:{rid}")
+        ])
+        buttons.append([
+            InlineKeyboardButton(text="👨‍🍳 Режим готовки", callback_data=f"act_cook:{rid}")
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 @router.message(Command("start"))
 async def start(m: Message): await m.answer(HELP)
@@ -41,49 +61,167 @@ async def got_cuisine(m: Message, state: FSMContext):
 @router.message(New.wish)
 async def got_wish(m: Message, state: FSMContext):
     data = await state.get_data(); await state.clear()
-    await m.answer("👨‍🍳 Придумываю блюдо...")
+    await m.answer("👨‍🍳 Придумываю блюдо с учетом КБЖУ и оборудования...")
     r = await ai.generate_recipe(data["cuisine"], m.text)
     last[m.from_user.id] = (r, None)
+    
     ings = "\n".join(f"• {i['name']} — {i['grams']} г" for i in r["ingredients"])
-    steps = "\n".join(f"{n}. {s}" for n, s in enumerate(r["steps"], 1))
-    await m.answer(f"✨ <b>{r['name']}</b>\n{r['description']}\n\n"
-                   f"Выход: {r['yield_g']} г\n\n<b>Ингредиенты:</b>\n{ings}\n\n"
-                   f"<b>Технология:</b>\n{steps}\n\n🎨 {r['plating']}\n\n"
-                   f"/img — фото, /save — сохранить", parse_mode="HTML")
+    eq = ", ".join(r.get("equipment", []))
+    kbzhu = f"КБЖУ (на 100г): К: {r.get('calories_per_100g', 0)} ккал | Б: {r.get('proteins_per_100g', 0)}г | Ж: {r.get('fats_per_100g', 0)}г | У: {r.get('carbs_per_100g', 0)}г"
+    
+    await m.answer(
+        f"✨ <b>{r['name']}</b>\n{r['description']}\n\n"
+        f"Выход: {r['yield_g']} г\n{kbzhu}\n\n"
+        f"⚙️ <b>Оборудование:</b> {eq}\n\n"
+        f"<b>Ингредиенты:</b>\n{ings}\n\n"
+        f"🎨 <b>Подача:</b> {r['plating']}",
+        parse_mode="HTML",
+        reply_markup=get_recipe_keyboard()
+    )
+
+@router.message(Command("scale"))
+async def scale_cmd(m: Message, command: CommandObject):
+    args = (command.args or "").split()
+    if len(args) < 2 or not args[0].isdigit() or not args[1].replace('.', '', 1).isdigit():
+        return await m.answer("Использование: /scale <id> <новый выход в граммах>\nПример: /scale 2 500")
+    rid = int(args[0])
+    new_yield = float(args[1])
+    r, _ = db.get_recipe(m.from_user.id, rid)
+    if not r: return await m.answer("Рецепт не найден.")
+    
+    scaled = docs.scale_recipe_data(r, new_yield)
+    ings = "\n".join(f"• {i['name']} — {i['grams']} г" for i in scaled["ingredients"])
+    await m.answer(f"⚖️ <b>Пересчет рецепта: {scaled['name']}</b>\nНовый выход: {scaled['yield_g']} г\n\n<b>Ингредиенты:</b>\n{ings}", parse_mode="HTML")
+
+@router.message(Command("sub"))
+async def sub_cmd(m: Message, command: CommandObject):
+    if not command.args:
+        return await m.answer("Укажите ингредиент для поиска аналогов:\nПример: /sub трюфельное масло")
+    ingredient = command.args
+    await m.answer(f"🔍 Подбираю профессиональные аналоги для «{ingredient}»...")
+    ans = await ai.get_substitution(ingredient)
+    await m.answer(f"🔄 <b>Аналоги для: {ingredient}</b>\n\n{ans}", parse_mode="HTML")
+
+@router.message(Command("cook"))
+async def cook_cmd(m: Message, command: CommandObject):
+    args = (command.args or "").split()
+    if not args or not args[0].isdigit():
+        return await m.answer("Укажите ID рецепта: /cook <id>")
+    rid = int(args[0])
+    r, _ = db.get_recipe(m.from_user.id, rid)
+    if not r: return await m.answer("Рецепт не найден.")
+    steps = r["steps"]
+    if not steps: return await m.answer("В рецепте нет шагов.")
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="▶️ Далее", callback_data=f"cook:{rid}:1")]
+    ])
+    await m.answer(
+        f"👨‍🍳 <b>Режим готовки: {r['name']}</b>\nШаг 1 из {len(steps)}\n\n{steps[0]}",
+        parse_mode="HTML",
+        reply_markup=keyboard
+    )
+
+@router.callback_query(F.data.startswith("cook:"))
+async def cook_callback(cq: CallbackQuery):
+    _, rid_str, step_idx_str = cq.data.split(":")
+    rid = int(rid_str); idx = int(step_idx_str)
+    r, _ = db.get_recipe(cq.from_user.id, rid)
+    if not r: return await cq.answer("Рецепт не найден", show_alert=True)
+    steps = r["steps"]
+    
+    buttons = []
+    row = []
+    if idx > 0: row.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"cook:{rid}:{idx-1}"))
+    if idx < len(steps) - 1: row.append(InlineKeyboardButton(text="▶️ Далее", callback_data=f"cook:{rid}:{idx+1}"))
+    if row: buttons.append(row)
+    
+    await cq.message.edit_text(
+        f"👨‍🍳 <b>Режим готовки: {r['name']}</b>\nШаг {idx+1} из {len(steps)}\n\n{steps[idx]}",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await cq.answer()
+
+@router.callback_query(F.data == "act_img")
+async def cb_img(cq: CallbackQuery):
+    if cq.from_user.id not in last:
+        return await cq.answer("Сначала создайте блюдо через /new", show_alert=True)
+    await cq.message.answer("🖼 Генерирую фото...")
+    recipe, _ = last[cq.from_user.id]
+    try:
+        photo = await ai.generate_image(recipe)
+        last[cq.from_user.id] = (recipe, photo)
+        await cq.message.answer_photo(BufferedInputFile(photo, filename="dish.png"), caption=recipe["name"])
+    except Exception as e:
+        await cq.message.answer(f"Не удалось создать фото: {str(e)[:200]}")
+    await cq.answer()
+
+@router.callback_query(F.data == "act_save")
+async def cb_save(cq: CallbackQuery):
+    if cq.from_user.id not in last:
+        return await cq.answer("Сначала создайте блюдо через /new", show_alert=True)
+    r, photo = last[cq.from_user.id]
+    rid = db.save_recipe(cq.from_user.id, r, photo)
+    await cq.message.answer(f"💾 Рецепт сохранен в базу! ID = {rid}\nТеперь доступны ТТК и себестоимость.", reply_markup=get_recipe_keyboard(rid))
+    await cq.answer()
+
+@router.callback_query(F.data.startswith("act_cost:"))
+async def cb_cost(cq: CallbackQuery):
+    rid = int(cq.data.split(":")[1])
+    r, _ = db.get_recipe(cq.from_user.id, rid)
+    if r:
+        await cq.message.answer(docs.food_cost(r, db.get_prices(cq.from_user.id)))
+    await cq.answer()
+
+@router.callback_query(F.data.startswith("act_ttk:"))
+async def cb_ttk(cq: CallbackQuery):
+    rid = int(cq.data.split(":")[1])
+    r, photo = db.get_recipe(cq.from_user.id, rid)
+    if r:
+        await cq.message.answer_document(BufferedInputFile(docs.make_pdf(r, photo).read(), f"TTK_{r['name']}.pdf"))
+        await cq.message.answer_document(BufferedInputFile(docs.make_excel(r).read(), f"TTK_{r['name']}.xlsx"))
+    await cq.answer()
+
+@router.callback_query(F.data.startswith("act_cook:"))
+async def cb_cook_start(cq: CallbackQuery):
+    rid = int(cq.data.split(":")[1])
+    r, _ = db.get_recipe(cq.from_user.id, rid)
+    if not r or not r.get("steps"):
+        return await cq.answer("Шаги не найдены", show_alert=True)
+    steps = r["steps"]
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="▶️ Далее", callback_data=f"cook:{rid}:1")]])
+    await cq.message.answer(
+        f"👨‍🍳 <b>Режим готовки: {r['name']}</b>\nШаг 1 из {len(steps)}\n\n{steps[0]}",
+        parse_mode="HTML",
+        reply_markup=keyboard
+    )
+    await cq.answer()
 
 @router.message(Command("img"))
 async def img(m: Message):
     if m.from_user.id not in last:
         return await m.answer("Сначала создайте блюдо командой /new")
-
-    await m.answer("🖼 Генерирую фото. Это может занять до минуты...")
+    await m.answer("🖼 Генерирую фото...")
     recipe, _ = last[m.from_user.id]
-
     try:
         photo = await ai.generate_image(recipe)
         last[m.from_user.id] = (recipe, photo)
-        await m.answer_photo(
-            BufferedInputFile(photo, filename="dish.png"),
-            caption=recipe["name"],
-        )
+        await m.answer_photo(BufferedInputFile(photo, filename="dish.png"), caption=recipe["name"])
     except Exception as e:
-        import logging
-        logging.exception("Ошибка при генерации изображения")
-        await m.answer(
-            f"Не удалось создать фото: {type(e).__name__}: {str(e)[:300]}"
-        )
+        await m.answer(f"Не удалось создать фото: {str(e)[:300]}")
 
 @router.message(Command("save"))
 async def save(m: Message):
     if m.from_user.id not in last: return await m.answer("Сначала /new")
     r, photo = last[m.from_user.id]
     rid = db.save_recipe(m.from_user.id, r, photo)
-    await m.answer(f"💾 Сохранено, id = {rid}")
+    await m.answer(f"💾 Сохранено, id = {rid}", reply_markup=get_recipe_keyboard(rid))
 
 @router.message(Command("my"))
 async def my(m: Message):
     rows = db.list_recipes(m.from_user.id)
-    await m.answer("📚 Мои блюда:\n" + "\n".join(f"{i}. {n}" for i, n in rows) if rows else "Пусто")
+    await m.answer("📚 Мои блюда:\n" + "\n".join(f"ID {i}. {n}" for i, n in rows) if rows else "Пусто")
 
 @router.message(Command("ttk"))
 async def ttk(m: Message, command: CommandObject):
@@ -129,3 +267,4 @@ async def shop(m: Message, command: CommandObject):
     recipes = [r for r in recipes if r]
     if not recipes: return await m.answer("Укажи id: /shop 1 2")
     await m.answer(docs.shopping_list(recipes))
+    
